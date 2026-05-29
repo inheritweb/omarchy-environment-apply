@@ -1,0 +1,21 @@
+# VM runtime artifacts
+.vm/*
+!.vm/.gitkeep
+shared/*
+!shared/.gitkeep
+
+# Local environment files
+.env
+.env.*
+
+# Editor/OS noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+
+# Logs and temp files
+*.log
+tmp/

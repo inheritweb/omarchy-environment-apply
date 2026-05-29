@@ -1,0 +1,602 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="0.1.0"
+
+CONFIG_FILE=""
+SOURCE_INPUT=""
+TEMP_ENV_FILE=""
+CONFIG_BASE_DIR=""
+RAW_BASE_URL=""
+DRY_RUN=false
+VERBOSE=false
+
+cleanup_temp() {
+  if [[ -n "$TEMP_ENV_FILE" && -f "$TEMP_ENV_FILE" ]]; then
+    rm -f "$TEMP_ENV_FILE"
+  fi
+}
+trap cleanup_temp EXIT
+
+usage() {
+  cat <<'EOF'
+omarchy-environment-apply
+
+Apply desktop environment changes from a JSON file or a GitHub/GitLab repo.
+
+Usage:
+  omarchy-environment-apply environment.json [--dry-run] [--verbose]
+  omarchy-environment-apply https://github.com/user/repo [--dry-run] [--verbose]
+  omarchy-environment-apply github:user/repo [--dry-run] [--verbose]
+
+Options:
+  --dry-run      Print actions without executing external commands
+  --verbose      Print extra logs
+  --version      Show tool version
+  --help, -h     Show this help
+EOF
+}
+
+log() {
+  printf '[omarchy-env] %s\n' "$*"
+}
+
+debug() {
+  if [[ "$VERBOSE" == true ]]; then
+    printf '[omarchy-env:debug] %s\n' "$*"
+  fi
+}
+
+die() {
+  printf '[omarchy-env:error] %s\n' "$*" >&2
+  exit 1
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+has_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+run_cmd() {
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: $*"
+    return 0
+  fi
+
+  debug "Running: $*"
+  "$@"
+}
+
+expand_path() {
+  local p="$1"
+  if [[ "$p" == "~"* ]]; then
+    p="${HOME}${p#\~}"
+  fi
+  printf '%s\n' "$p"
+}
+
+is_github_repo() {
+  local input="$1"
+  [[ "$input" =~ ^https://github\.com/[^/]+/[^/] ]] || [[ "$input" =~ ^github:[^/]+/ ]]
+}
+
+is_gitlab_repo() {
+  local input="$1"
+  [[ "$input" =~ ^https://gitlab\.com/[^/]+/[^/] ]] || [[ "$input" =~ ^gitlab:[^/]+/ ]]
+}
+
+parse_github_slug() {
+  local input="$1"
+  local slug
+  if [[ "$input" =~ ^https://github\.com/ ]]; then
+    slug="${input#https://github.com/}"
+  else
+    slug="${input#github:}"
+  fi
+  slug="$(printf '%s' "$slug" | cut -d'/' -f1-2)"
+  printf '%s' "${slug%.git}"
+}
+
+parse_gitlab_slug() {
+  local input="$1"
+  local slug
+  if [[ "$input" =~ ^https://gitlab\.com/ ]]; then
+    slug="${input#https://gitlab.com/}"
+  else
+    slug="${input#gitlab:}"
+  fi
+  slug="$(printf '%s' "$slug" | cut -d'/' -f1-2)"
+  printf '%s' "${slug%.git}"
+}
+
+fetch_env_from_repo() {
+  local input="$1"
+  local slug raw_url
+
+  if is_github_repo "$input"; then
+    slug="$(parse_github_slug "$input")"
+    RAW_BASE_URL="https://raw.githubusercontent.com/${slug}/HEAD"
+    raw_url="${RAW_BASE_URL}/environment.json"
+  elif is_gitlab_repo "$input"; then
+    slug="$(parse_gitlab_slug "$input")"
+    RAW_BASE_URL="https://gitlab.com/${slug}/-/raw/HEAD"
+    raw_url="${RAW_BASE_URL}/environment.json"
+  else
+    return 1
+  fi
+
+  require_cmd curl
+  TEMP_ENV_FILE="$(mktemp --suffix=.json)"
+  debug "Fetching environment from: $raw_url"
+  curl -fsSL "$raw_url" -o "$TEMP_ENV_FILE" || die "Failed to fetch environment from: $raw_url"
+  CONFIG_FILE="$TEMP_ENV_FILE"
+}
+
+config_base_dir() {
+  if [[ -n "$CONFIG_BASE_DIR" ]]; then
+    printf '%s\n' "$CONFIG_BASE_DIR"
+  else
+    dirname "$CONFIG_FILE"
+  fi
+}
+
+strip_relative_prefix() {
+  local p="$1"
+  while [[ "$p" == ./* ]]; do
+    p="${p#./}"
+  done
+  printf '%s\n' "$p"
+}
+
+resolve_local_path() {
+  local p="$1"
+
+  if [[ "$p" == "~"* ]]; then
+    expand_path "$p"
+  elif [[ "$p" == /* ]]; then
+    printf '%s\n' "$p"
+  else
+    printf '%s/%s\n' "$(config_base_dir)" "$p"
+  fi
+}
+
+resolve_local_asset_path() {
+  local p="$1"
+
+  p="$(strip_relative_prefix "$p")"
+
+  if [[ "$p" == "~"* || "$p" == /* ]]; then
+    resolve_local_path "$p"
+  elif [[ "$p" == assets/* ]]; then
+    printf '%s/%s\n' "$(config_base_dir)" "$p"
+  elif [[ "$p" == */* ]]; then
+    die "Local file assets must live under assets/: $p"
+  else
+    printf '%s/assets/%s\n' "$(config_base_dir)" "$p"
+  fi
+}
+
+validate_relative_asset_path() {
+  local p="$1"
+
+  p="$(strip_relative_prefix "$p")"
+  [[ "$p" != /* ]] || die "Remote asset paths must be relative: $p"
+  [[ "$p" != *".."* ]] || die "Remote asset paths may not contain '..': $p"
+
+  case "$p" in
+    assets/*)
+      printf '%s\n' "$p"
+      ;;
+    */*)
+      die "Remote file assets must live under assets/: $p"
+      ;;
+    *)
+      printf 'assets/%s\n' "$p"
+      ;;
+  esac
+}
+
+sed_escape_basic_regex() {
+  local value="$1"
+  printf '%s' "$value" | sed 's/[|]/\\&/g'
+}
+
+sed_escape_replacement() {
+  local value="$1"
+  printf '%s' "$value" | sed 's/[&|\\]/\\&/g'
+}
+
+validate_config() {
+  jq -e '
+    def is_nonempty_string: type == "string" and length > 0;
+    .version == 1
+    and ((.themes.install // []) | type == "array")
+    and ((.themes.backgrounds // []) | type == "array")
+    and ((.files // []) | type == "array")
+    and ((.browsers.add // []) | type == "array")
+    and ((.browsers.remove // []) | type == "array")
+    and ((.editors.add // []) | type == "array")
+    and ((.editors.remove // []) | type == "array")
+    and ((.packages.add // []) | type == "array")
+    and ((.packages.remove // []) | type == "array")
+    and ((.web_apps.add // []) | type == "array")
+    and ((.web_apps.remove // []) | type == "array")
+    and all((.themes.install // [])[]; .repo | is_nonempty_string)
+    and all((.themes.backgrounds // [])[]; (.theme | is_nonempty_string) and (.source | is_nonempty_string))
+    and all((.files // [])[];
+      (.path | is_nonempty_string)
+      and (.action | IN("write", "append", "replace", "ensure_line"))
+      and (if .action == "replace" then ((.search | is_nonempty_string) and (.replace | type == "string")) else true end)
+      and (if (.action == "write" or .action == "append" or .action == "ensure_line") then (.content | type == "string") else true end)
+    )
+    and all((.web_apps.add // [])[]; (.name | is_nonempty_string) and (.url | is_nonempty_string))
+    and all((.web_apps.remove // [])[]; type == "string" and length > 0)
+  ' "$CONFIG_FILE" >/dev/null || die "Invalid config. Check required fields and array types."
+}
+
+pkg_install() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+
+  if has_cmd omarchy-pkg-add; then
+    run_cmd omarchy-pkg-add "$@"
+  elif has_cmd omarchy-pkg-install; then
+    run_cmd omarchy-pkg-install "$@"
+  elif has_cmd omarchy; then
+    run_cmd omarchy pkg add "$@"
+  elif has_cmd sudo && has_cmd pacman; then
+    run_cmd sudo pacman -S --needed --noconfirm "$@"
+  else
+    die "No package install command found (tried omarchy-pkg-add, omarchy pkg add, pacman)."
+  fi
+}
+
+pkg_remove() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+
+  if has_cmd omarchy-pkg-drop; then
+    run_cmd omarchy-pkg-drop "$@"
+  elif has_cmd omarchy-pkg-remove; then
+    run_cmd omarchy-pkg-remove "$@"
+  elif has_cmd omarchy; then
+    run_cmd omarchy pkg drop "$@"
+  elif has_cmd sudo && has_cmd pacman; then
+    run_cmd sudo pacman -Rns --noconfirm "$@"
+  else
+    die "No package remove command found (tried omarchy-pkg-drop, omarchy pkg drop, pacman)."
+  fi
+}
+
+theme_name_from_repo() {
+  local repo="$1"
+  local path_part="$repo"
+
+  if [[ "$path_part" != *"://" && "$path_part" == *:*/* ]]; then
+    path_part="${path_part#*:}"
+  fi
+
+  basename "$path_part" .git | sed -E 's/^omarchy-//; s/-theme$//' | tr '[:upper:]' '[:lower:]'
+}
+
+theme_install_fallback() {
+  local repo="$1"
+  local apply_theme="$2"
+  local themes_dir="$HOME/.config/omarchy/themes"
+  local theme_name
+  local theme_path
+
+  theme_name="$(theme_name_from_repo "$repo")"
+  theme_path="$themes_dir/$theme_name"
+
+  run_cmd mkdir -p "$themes_dir"
+
+  if [[ -d "$theme_path" ]]; then
+    run_cmd rm -rf "$theme_path"
+  fi
+
+  run_cmd git clone "$repo" "$theme_path"
+
+  if [[ "$apply_theme" == "true" ]]; then
+    if has_cmd omarchy-theme-set; then
+      run_cmd omarchy-theme-set "$theme_name"
+    elif has_cmd omarchy; then
+      run_cmd omarchy theme set "$theme_name"
+    else
+      log "Skipping apply-theme for '$theme_name' (no omarchy theme set command found)."
+    fi
+  fi
+}
+
+install_theme() {
+  local repo="$1"
+  local apply_theme="$2"
+
+  if has_cmd omarchy-theme-install; then
+    run_cmd omarchy-theme-install "$repo"
+  elif has_cmd omarchy; then
+    run_cmd omarchy theme install "$repo"
+  else
+    theme_install_fallback "$repo" "$apply_theme"
+    return 0
+  fi
+
+  if [[ "$apply_theme" == "true" ]]; then
+    local theme_name
+    theme_name="$(theme_name_from_repo "$repo")"
+    if has_cmd omarchy-theme-set; then
+      run_cmd omarchy-theme-set "$theme_name"
+    elif has_cmd omarchy; then
+      run_cmd omarchy theme set "$theme_name"
+    fi
+  fi
+}
+
+add_theme_background() {
+  local theme="$1"
+  local source="$2"
+  local target_name="$3"
+  local link_default="$4"
+  local theme_dir="$HOME/.config/omarchy/themes/$theme"
+  local target_path
+
+  [[ "$target_name" != */* && "$target_name" != "." && "$target_name" != ".." ]] || die "Invalid background target_name: $target_name"
+
+  target_path="$theme_dir/$target_name"
+
+  run_cmd mkdir -p "$theme_dir"
+
+  if [[ "$source" =~ ^https?:// ]]; then
+    require_cmd curl
+    run_cmd curl -fsSL "$source" -o "$target_path"
+  elif [[ -n "$RAW_BASE_URL" ]]; then
+    local asset_path
+    asset_path="$(validate_relative_asset_path "$source")"
+    require_cmd curl
+    run_cmd curl -fsSL "${RAW_BASE_URL}/${asset_path}" -o "$target_path"
+  else
+    local src_path
+    src_path="$(resolve_local_asset_path "$source")"
+    [[ -f "$src_path" ]] || die "Background source not found: $src_path"
+    run_cmd cp "$src_path" "$target_path"
+  fi
+
+  if [[ "$link_default" == "true" ]]; then
+    run_cmd ln -sfn "$target_path" "$theme_dir/background"
+  fi
+}
+
+apply_file_op() {
+  local path="$1"
+  local action="$2"
+  local content="$3"
+  local search="$4"
+  local replace="$5"
+
+  local expanded
+  expanded="$(expand_path "$path")"
+
+  case "$action" in
+    write)
+      run_cmd mkdir -p "$(dirname "$expanded")"
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: write file $expanded"
+      else
+        printf '%s' "$content" >"$expanded"
+      fi
+      ;;
+    append)
+      run_cmd mkdir -p "$(dirname "$expanded")"
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: append to file $expanded"
+      else
+        printf '%s' "$content" >>"$expanded"
+      fi
+      ;;
+    replace)
+      [[ -n "$search" ]] || die "replace action requires non-empty search"
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: replace in file $expanded"
+      else
+        [[ -f "$expanded" ]] || die "replace action requires existing file: $expanded"
+        local escaped_search escaped_replace
+        escaped_search="$(sed_escape_basic_regex "$search")"
+        escaped_replace="$(sed_escape_replacement "$replace")"
+        sed -i "s|$escaped_search|$escaped_replace|g" "$expanded"
+      fi
+      ;;
+    ensure_line)
+      run_cmd mkdir -p "$(dirname "$expanded")"
+      if [[ "$DRY_RUN" == true ]]; then
+        log "DRY-RUN: ensure line in $expanded"
+      else
+        touch "$expanded"
+        if ! grep -Fqx "$content" "$expanded"; then
+          printf '%s\n' "$content" >>"$expanded"
+        fi
+      fi
+      ;;
+    *)
+      die "Unsupported file action: $action"
+      ;;
+  esac
+}
+
+sanitize_id() {
+  local input="$1"
+  printf '%s' "$input" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+add_web_app() {
+  local name="$1"
+  local url="$2"
+  local browser="$3"
+  local icon="$4"
+  local categories="$5"
+
+  local id
+  local app_dir
+  local desktop_file
+  local exec_url
+
+  id="$(sanitize_id "$name")"
+  [[ -n "$id" ]] || die "Web app name does not produce a valid desktop id: $name"
+  app_dir="$HOME/.local/share/applications"
+  desktop_file="$app_dir/$id.desktop"
+  exec_url="${url//\\/\\\\}"
+  exec_url="${exec_url//\"/\\\"}"
+
+  run_cmd mkdir -p "$app_dir"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: create web app launcher $desktop_file"
+    return 0
+  fi
+
+  cat >"$desktop_file" <<EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$name
+Comment=Web application launcher for $name
+Exec=$browser --app="$exec_url"
+Terminal=false
+Icon=$icon
+Categories=$categories
+StartupNotify=true
+EOF
+}
+
+remove_web_app() {
+  local name="$1"
+  local id
+  local desktop_file
+
+  id="$(sanitize_id "$name")"
+  desktop_file="$HOME/.local/share/applications/$id.desktop"
+
+  if [[ -f "$desktop_file" ]]; then
+    run_cmd rm -f "$desktop_file"
+  else
+    debug "Web app launcher not found, skipping: $desktop_file"
+  fi
+}
+
+read_json_array() {
+  local query="$1"
+  jq -r "($query // []) | .[]?" "$CONFIG_FILE"
+}
+
+main() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run)
+        DRY_RUN=true
+        shift
+        ;;
+      --verbose)
+        VERBOSE=true
+        shift
+        ;;
+      --version)
+        printf '%s\n' "$VERSION"
+        exit 0
+        ;;
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      --*)
+        die "Unknown option: $1"
+        ;;
+      *)
+        if [[ -n "$SOURCE_INPUT" ]]; then
+          die "Unexpected extra argument: $1"
+        fi
+        SOURCE_INPUT="$1"
+        CONFIG_FILE="$1"
+        shift
+        ;;
+    esac
+  done
+
+  [[ -n "$SOURCE_INPUT" ]] || die "Missing required input path or repository"
+
+  if is_github_repo "$SOURCE_INPUT" || is_gitlab_repo "$SOURCE_INPUT"; then
+    fetch_env_from_repo "$SOURCE_INPUT"
+  elif [[ ! -f "$CONFIG_FILE" ]]; then
+    die "Config file not found: $CONFIG_FILE"
+  else
+    CONFIG_BASE_DIR="$(cd "$(dirname "$CONFIG_FILE")" && pwd)"
+  fi
+
+  require_cmd jq
+
+  validate_config
+
+  log "Applying environment from: $SOURCE_INPUT"
+
+  while IFS= read -r theme_install; do
+    [[ -n "$theme_install" ]] || continue
+    local repo local_apply
+    repo=$(jq -r '.repo' <<<"$theme_install")
+    local_apply=$(jq -r '(.apply_theme // true)' <<<"$theme_install")
+    install_theme "$repo" "$local_apply"
+  done < <(jq -c '(.themes.install // [])[]' "$CONFIG_FILE")
+
+  while IFS= read -r bg; do
+    [[ -n "$bg" ]] || continue
+    local theme source target link_default
+    theme=$(jq -r '.theme' <<<"$bg")
+    source=$(jq -r '.source' <<<"$bg")
+    target=$(jq -r '(.target_name // (.source | split("/") | last))' <<<"$bg")
+    link_default=$(jq -r '(.set_as_default // false)' <<<"$bg")
+    add_theme_background "$theme" "$source" "$target" "$link_default"
+  done < <(jq -c '.themes.backgrounds[]?' "$CONFIG_FILE")
+
+  while IFS= read -r file_op; do
+    [[ -n "$file_op" ]] || continue
+    local path action content search replace
+    path=$(jq -r '.path' <<<"$file_op")
+    action=$(jq -r '.action' <<<"$file_op")
+    content=$(jq -r '(.content // "")' <<<"$file_op")
+    search=$(jq -r '(.search // "")' <<<"$file_op")
+    replace=$(jq -r '(.replace // "")' <<<"$file_op")
+    apply_file_op "$path" "$action" "$content" "$search" "$replace"
+  done < <(jq -c '.files[]?' "$CONFIG_FILE")
+
+  mapfile -t browsers_add < <(read_json_array '.browsers.add')
+  mapfile -t browsers_remove < <(read_json_array '.browsers.remove')
+  mapfile -t editors_add < <(read_json_array '.editors.add')
+  mapfile -t editors_remove < <(read_json_array '.editors.remove')
+  mapfile -t pkgs_add < <(read_json_array '.packages.add')
+  mapfile -t pkgs_remove < <(read_json_array '.packages.remove')
+
+  pkg_install "${browsers_add[@]}" "${editors_add[@]}" "${pkgs_add[@]}"
+  pkg_remove "${browsers_remove[@]}" "${editors_remove[@]}" "${pkgs_remove[@]}"
+
+  while IFS= read -r app; do
+    [[ -n "$app" ]] || continue
+    local name url browser icon categories
+    name=$(jq -r '.name' <<<"$app")
+    url=$(jq -r '.url' <<<"$app")
+    browser=$(jq -r '(.browser // "google-chrome-stable")' <<<"$app")
+    icon=$(jq -r '(.icon // "web-browser")' <<<"$app")
+    categories=$(jq -r '(.categories // "Network;")' <<<"$app")
+    add_web_app "$name" "$url" "$browser" "$icon" "$categories"
+  done < <(jq -c '.web_apps.add[]?' "$CONFIG_FILE")
+
+  while IFS= read -r app_name; do
+    [[ -n "$app_name" ]] || continue
+    remove_web_app "$app_name"
+  done < <(read_json_array '.web_apps.remove')
+
+  log "Environment apply complete."
+}
+
+main "$@"

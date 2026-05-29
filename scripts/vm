@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE_FILE="$ROOT_DIR/docker-compose.yaml"
+SERVICE_NAME="omarchy-vm"
+CONTAINER_NAME="omarchy-vm"
+DATA_DIR="$ROOT_DIR/.vm"
+SHARED_DIR="$ROOT_DIR/shared"
+SCREENSHOTS_DIR="$DATA_DIR/screenshots"
+
+usage() {
+  cat <<'EOF'
+vm
+
+Usage:
+  ./scripts/vm up
+  ./scripts/vm key super-return
+  ./scripts/vm screenshot [name.png]
+  ./scripts/vm down
+  ./scripts/vm clear
+  ./scripts/vm reset
+  ./scripts/vm logs
+  ./scripts/vm status
+  ./scripts/vm console
+
+EOF
+}
+
+die() {
+  printf '[vm:error] %s\n' "$*" >&2
+  exit 1
+}
+
+require_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+dc() {
+  docker compose -f "$COMPOSE_FILE" "$@"
+}
+
+container_process() {
+  docker exec "$CONTAINER_NAME" sh -lc 'cat /proc/1/comm' 2>/dev/null || true
+}
+
+qemu_is_running() {
+  local comm
+  comm="$(container_process)"
+  [[ "$comm" == qemu-system-* ]]
+}
+
+wait_for_qemu() {
+  local timeout_sec="${1:-300}"
+  local start elapsed
+
+  start="$(date +%s)"
+  while true; do
+    if qemu_is_running; then
+      return 0
+    fi
+
+    elapsed=$(( $(date +%s) - start ))
+    if (( elapsed >= timeout_sec )); then
+      return 1
+    fi
+
+    if (( elapsed > 0 && elapsed % 20 == 0 )); then
+      printf '[vm] Waiting for QEMU to start (%ss elapsed)\n' "$elapsed"
+    fi
+
+    sleep 2
+  done
+}
+
+ensure_vm_up() {
+  require_cmd docker
+  mkdir -p "$DATA_DIR" "$SHARED_DIR"
+  dc up -d --build "$SERVICE_NAME"
+}
+
+require_vm_running() {
+  require_cmd docker
+  local running
+  running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null || true)"
+  [[ "$running" == "true" ]] || die "VM is not running. Start it first with: ./scripts/vm up"
+}
+
+vnc_key() {
+  local key="${1//+/-}"
+  docker exec "$CONTAINER_NAME" vncdo -s 127.0.0.1::5900 key "$key"
+}
+
+cmd_up() {
+  ensure_vm_up
+  if qemu_is_running; then
+    printf '[vm] VNC ready: 127.0.0.1:5900\n'
+  else
+    printf '[vm] Container is up, but QEMU has not started yet.\n'
+    printf '[vm] The ISO may still be downloading. Check progress with: ./scripts/vm logs\n'
+    printf '[vm] VNC will be available at 127.0.0.1:5900 once QEMU starts.\n'
+  fi
+}
+
+cmd_screenshot() {
+  require_vm_running
+
+  if ! wait_for_qemu 300; then
+    die "QEMU has not started yet. Check ISO download/boot progress with: ./scripts/vm logs"
+  fi
+
+  local output_name="${1:-omarchy-vm-$(date +%Y%m%d-%H%M%S).png}"
+  local host_output="$SCREENSHOTS_DIR/$output_name"
+  local container_output="/data/screenshots/$output_name"
+
+  mkdir -p "$SCREENSHOTS_DIR"
+  docker exec "$CONTAINER_NAME" sh -lc "mkdir -p /data/screenshots && vncdo -s 127.0.0.1::5900 capture $(printf '%q' "$container_output")"
+  printf '[vm] Saved screenshot to %s\n' "$host_output"
+}
+
+cmd_key() {
+  [[ $# -gt 0 ]] || die "Usage: ./scripts/vm key super-return [key ...]"
+
+  require_vm_running
+
+  if ! wait_for_qemu 300; then
+    die "QEMU has not started yet. Check ISO download/boot progress with: ./scripts/vm logs"
+  fi
+
+  local key
+  for key in "$@"; do
+    vnc_key "$key"
+  done
+}
+
+cmd_down() {
+  require_cmd docker
+  dc down
+}
+
+cmd_clear() {
+  require_cmd docker
+  dc down --remove-orphans
+  mkdir -p "$DATA_DIR" "$SHARED_DIR"
+  find "$DATA_DIR" -mindepth 1 ! -name 'installer.iso' -exec rm -rf {} +
+  find "$SHARED_DIR" -mindepth 1 ! -name .gitkeep -exec rm -rf {} +
+  touch "$SHARED_DIR/.gitkeep"
+  printf '[vm] Cleared VM disk, screenshots, container state, and shared files. ISO kept if present.\n'
+}
+
+cmd_reset() {
+  cmd_clear
+  cmd_up
+}
+
+cmd_logs() {
+  require_cmd docker
+  dc logs -f --tail 80 "$SERVICE_NAME"
+}
+
+cmd_status() {
+  require_cmd docker
+  dc ps
+}
+
+cmd_console() {
+  require_cmd docker
+  ensure_vm_up
+  docker attach "$CONTAINER_NAME"
+}
+
+main() {
+  local cmd="${1:-help}"
+  shift || true
+
+  case "$cmd" in
+    up) cmd_up "$@" ;;
+    key) cmd_key "$@" ;;
+    screenshot) cmd_screenshot "$@" ;;
+    down) cmd_down "$@" ;;
+    clear) cmd_clear "$@" ;;
+    reset) cmd_reset "$@" ;;
+    logs) cmd_logs "$@" ;;
+    status) cmd_status "$@" ;;
+    console) cmd_console "$@" ;;
+    help|--help|-h) usage ;;
+    *) die "Unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

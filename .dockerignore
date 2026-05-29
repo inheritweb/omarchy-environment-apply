@@ -1,0 +1,9 @@
+.git
+.vm/*
+!.vm/.gitkeep
+shared/*
+!shared/.gitkeep
+.env
+.env.*
+tmp
+*.log

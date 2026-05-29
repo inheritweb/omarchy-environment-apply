@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "themes": {
+    "install": [
+      {
+        "repo": "https://github.com/vyrx-dev/omarchy-aamis-theme.git",
+        "apply_theme": true
+      }
+    ],
+    "backgrounds": [
+      {
+        "theme": "forest",
+        "source": "forest.jpg",
+        "target_name": "forest.jpg",
+        "set_as_default": true
+      }
+    ]
+  },
+  "files": [
+    {
+      "path": "~/.bashrc",
+      "action": "ensure_line",
+      "content": "source /usr/share/nvm/init-nvm.sh"
+    },
+    {
+      "path": "~/.config/waybar/style.css",
+      "action": "replace",
+      "search": "font-size: 12px;",
+      "replace": "font-size: 13px;"
+    },
+    {
+      "path": "~/.config/waybar/style.css",
+      "action": "append",
+      "content": "\n/* custom module tweak */\n#custom-weather { color: #8fbf8f; }\n"
+    }
+  ],
+  "browsers": {
+    "add": [
+      "google-chrome",
+      "zen-browser"
+    ],
+    "remove": [
+      "firefox"
+    ]
+  },
+  "editors": {
+    "add": [
+      "code"
+    ],
+    "remove": []
+  },
+  "packages": {
+    "add": [
+      "ripgrep",
+      "fd",
+      "nvm"
+    ],
+    "remove": [
+      "thunderbird"
+    ]
+  },
+  "web_apps": {
+    "add": [
+      {
+        "name": "Linear",
+        "url": "https://linear.app",
+        "browser": "google-chrome-stable",
+        "icon": "web-browser",
+        "categories": "Network;"
+      }
+    ],
+    "remove": [
+      "Old Internal Tool"
+    ]
+  }
+}

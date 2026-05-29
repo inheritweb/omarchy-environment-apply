@@ -1,0 +1,38 @@
+services:
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    entrypoint: []
+    command: ./tests/test.sh
+    profiles:
+      - test
+
+  omarchy-vm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: omarchy-environment-apply:latest
+    container_name: omarchy-vm
+    ports:
+      - "127.0.0.1:5900:5900"
+    volumes:
+      - ./.vm:/data
+      - ./shared:/shared
+    environment:
+      DISPLAY: ":0"
+      MEMORY: "8G"
+      CPUS: "4"
+      DISK_SIZE: "80G"
+      VM_ISO_URL: "https://iso.omarchy.org/omarchy-3.8.2.iso"
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 8G
+    privileged: true
+    restart: "no"
