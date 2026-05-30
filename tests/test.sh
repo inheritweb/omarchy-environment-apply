@@ -12,13 +12,14 @@ STUB_DIR="$TMP_DIR/stubs"
 LOG_FILE="$TMP_DIR/calls.log"
 
 mkdir -p "$TEST_HOME" "$STUB_DIR"
+mkdir -p "$TMP_DIR/pacman-sync"
 
 create_stub() {
   local name="$1"
   cat >"$STUB_DIR/$name" <<EOF
 #!/bin/sh
 echo "$name \$*" >>"$LOG_FILE"
-if [ "$name" = "curl" ]; then
+  if [ "$name" = "curl" ]; then
   out=""
   url=""
   while [ \$# -gt 0 ]; do
@@ -44,6 +45,11 @@ if [ "$name" = "curl" ]; then
         ;;
     esac
   fi
+  fi
+if [ "$name" = "pacman-conf" ]; then
+  if [ "\$1" = "--repo-list" ]; then
+    printf '%s\n' core extra omarchy
+  fi
 fi
 exit 0
 EOF
@@ -65,6 +71,7 @@ for cmd in \
   omarchy-pkg-add \
   omarchy-pkg-drop \
   hyprctl \
+  pacman-conf \
   sudo \
   pacman \
   git \
@@ -106,13 +113,13 @@ cat >"$TMP_DIR/config.json" <<EOF
 }
 EOF
 
-PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" "$SCRIPT" "$TMP_DIR/config.json"
-PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" "$SCRIPT" github:example/omarchy-ocean-theme
+PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" PACMAN_SYNC_DIR="$TMP_DIR/pacman-sync" "$SCRIPT" "$TMP_DIR/config.json"
+PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" PACMAN_SYNC_DIR="$TMP_DIR/pacman-sync" "$SCRIPT" github:example/omarchy-ocean-theme
 
 cat >"$TMP_DIR/minimal.json" <<EOF
 {"version":1}
 EOF
-minimal_output="$(PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" "$SCRIPT" "$TMP_DIR/minimal.json" 2>&1)"
+minimal_output="$(PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" PACMAN_SYNC_DIR="$TMP_DIR/pacman-sync" "$SCRIPT" "$TMP_DIR/minimal.json" 2>&1)"
 if printf '%s' "$minimal_output" | grep -Fq "jq:"; then
   echo "Assertion failed: minimal config emitted jq error"
   echo "$minimal_output"
@@ -133,7 +140,7 @@ cat >"$TMP_DIR/replace.json" <<EOF
   ]
 }
 EOF
-PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" "$SCRIPT" "$TMP_DIR/replace.json"
+PATH="$STUB_DIR:$PATH" HOME="$TEST_HOME" PACMAN_SYNC_DIR="$TMP_DIR/pacman-sync" "$SCRIPT" "$TMP_DIR/replace.json"
 
 assert_contains() {
   local needle="$1"
@@ -156,6 +163,7 @@ assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-oc
 assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/assets/ocean.jpg" "$LOG_FILE"
 assert_contains "omarchy-theme-bg-set $TEST_HOME/.config/omarchy/backgrounds/ocean/ocean.jpg" "$LOG_FILE"
 assert_contains "omarchy-restart-waybar" "$LOG_FILE"
+assert_contains "sudo pacman -Sy --noconfirm" "$LOG_FILE"
 assert_contains "omarchy-install-browser chrome" "$LOG_FILE"
 assert_contains "omarchy-install-vscode" "$LOG_FILE"
 assert_contains "omarchy-pkg-add ripgrep nvm" "$LOG_FILE"

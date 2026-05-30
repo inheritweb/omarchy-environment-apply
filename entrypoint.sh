@@ -51,4 +51,5 @@ exec qemu-system-x86_64 \
   -device VGA,edid=on,xres=1760,yres=990,vgamem_mb=32 \
   -net user,smb="$SHARED_DIR" \
   -net nic \
+  -qmp unix:/data/qmp.sock,server=on,wait=off \
   -serial mon:stdio

@@ -10,6 +10,7 @@ CONFIG_BASE_DIR=""
 RAW_BASE_URL=""
 DRY_RUN=false
 VERBOSE=false
+PACMAN_SYNC_DIR="${PACMAN_SYNC_DIR:-/var/lib/pacman/sync}"
 
 cleanup_temp() {
   if [[ -n "$TEMP_ENV_FILE" && -f "$TEMP_ENV_FILE" ]]; then
@@ -270,6 +271,31 @@ pkg_remove() {
     run_cmd sudo pacman -Rns --noconfirm "$@"
   else
     die "No package remove command found (tried omarchy-pkg-drop, omarchy pkg drop, pacman)."
+  fi
+}
+
+package_database_sync_needed() {
+  has_cmd pacman-conf || return 1
+
+  local repos=()
+  local repo
+  mapfile -t repos < <(pacman-conf --repo-list 2>/dev/null)
+
+  for repo in "${repos[@]}"; do
+    [[ -n "$repo" ]] || continue
+    [[ -f "${PACMAN_SYNC_DIR}/${repo}.db" ]] || return 0
+  done
+
+  return 1
+}
+
+sync_package_databases() {
+  package_database_sync_needed || return 0
+
+  if has_cmd sudo && has_cmd pacman; then
+    run_cmd sudo pacman -Sy --noconfirm
+  else
+    die "Package databases are missing, but sudo pacman is not available to sync them."
   fi
 }
 
@@ -771,6 +797,10 @@ main() {
   mapfile -t editors_remove < <(read_json_array '.editors.remove')
   mapfile -t pkgs_add < <(read_json_array '.packages.add')
   mapfile -t pkgs_remove < <(read_json_array '.packages.remove')
+
+  if (( ${#browsers_add[@]} + ${#browsers_remove[@]} + ${#editors_add[@]} + ${#editors_remove[@]} + ${#pkgs_add[@]} + ${#pkgs_remove[@]} > 0 )); then
+    sync_package_databases
+  fi
 
   for browser in "${browsers_add[@]}"; do
     [[ -n "$browser" ]] || continue

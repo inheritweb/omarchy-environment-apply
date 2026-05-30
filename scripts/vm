@@ -110,11 +110,80 @@ cmd_screenshot() {
   fi
 
   local output_name="${1:-omarchy-vm-$(date +%Y%m%d-%H%M%S).png}"
+  [[ "$output_name" != */* ]] || die "Screenshot name must not contain '/': $output_name"
   local host_output="$SCREENSHOTS_DIR/$output_name"
   local container_output="/data/screenshots/$output_name"
 
   mkdir -p "$SCREENSHOTS_DIR"
-  docker exec "$CONTAINER_NAME" sh -lc "mkdir -p /data/screenshots && vncdo -s 127.0.0.1::5900 capture $(printf '%q' "$container_output")"
+  docker exec \
+    -i \
+    -e SCREENSHOT_OUTPUT="$container_output" \
+    "$CONTAINER_NAME" \
+    python - <<'PY'
+import json
+import os
+import pathlib
+import socket
+
+from PIL import Image
+
+output = pathlib.Path(os.environ["SCREENSHOT_OUTPUT"])
+qmp_socket = pathlib.Path("/data/qmp.sock")
+tmp_ppm = output.with_suffix(output.suffix + ".ppm")
+
+if not qmp_socket.exists():
+    raise SystemExit("QMP socket not found. Restart the VM with: ./scripts/vm down && ./scripts/vm up")
+
+output.parent.mkdir(parents=True, exist_ok=True)
+tmp_ppm.unlink(missing_ok=True)
+output.unlink(missing_ok=True)
+
+def recv_message(sock):
+    data = b""
+    while b"\r\n" not in data:
+        chunk = sock.recv(4096)
+        if not chunk:
+            raise RuntimeError("QMP connection closed")
+        data += chunk
+    line, _, _ = data.partition(b"\r\n")
+    return json.loads(line.decode("utf-8"))
+
+def send(sock, payload):
+    sock.sendall(json.dumps(payload).encode("utf-8") + b"\r\n")
+    while True:
+        message = recv_message(sock)
+        if "return" in message:
+            return message
+        if "error" in message:
+            raise RuntimeError(message["error"])
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(str(qmp_socket))
+    recv_message(sock)
+    send(sock, {"execute": "qmp_capabilities"})
+    send(
+        sock,
+        {
+            "execute": "human-monitor-command",
+            "arguments": {"command-line": f"screendump {tmp_ppm}"},
+        },
+    )
+
+if not tmp_ppm.exists() or tmp_ppm.stat().st_size == 0:
+    raise SystemExit(f"QEMU did not create screenshot: {tmp_ppm}")
+
+if output.suffix.lower() == ".ppm":
+    tmp_ppm.rename(output)
+else:
+    with Image.open(tmp_ppm) as image:
+        image.save(output)
+    tmp_ppm.unlink(missing_ok=True)
+
+if not output.exists() or output.stat().st_size == 0:
+    raise SystemExit(f"Screenshot was not created: {output}")
+PY
+
+  [[ -f "$host_output" ]] || die "Screenshot command finished but file was not created: $host_output"
   printf '[vm] Saved screenshot to %s\n' "$host_output"
 }
 
