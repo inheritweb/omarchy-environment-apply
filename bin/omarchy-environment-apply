@@ -132,7 +132,7 @@ fetch_env_from_repo() {
   require_cmd curl
   TEMP_ENV_FILE="$(mktemp --suffix=.json)"
   debug "Fetching environment from: $raw_url"
-  curl -fsSL "$raw_url" -o "$TEMP_ENV_FILE" || die "Failed to fetch environment from: $raw_url"
+  curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "${raw_url}?_=$(date +%s)" -o "$TEMP_ENV_FILE" || die "Failed to fetch environment from: $raw_url"
   CONFIG_FILE="$TEMP_ENV_FILE"
 }
 
@@ -243,14 +243,28 @@ pkg_install() {
     return 0
   fi
 
+  local missing=()
+  local pkg
+  for pkg in "$@"; do
+    if has_cmd pacman && pacman -Q "$pkg" >/dev/null 2>&1; then
+      debug "Package already installed, skipping: $pkg"
+    else
+      missing+=("$pkg")
+    fi
+  done
+
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    return 0
+  fi
+
   if has_cmd omarchy-pkg-add; then
-    run_cmd omarchy-pkg-add "$@"
+    run_cmd omarchy-pkg-add "${missing[@]}"
   elif has_cmd omarchy-pkg-install; then
-    run_cmd omarchy-pkg-install "$@"
+    run_cmd omarchy-pkg-install "${missing[@]}"
   elif has_cmd omarchy; then
-    run_cmd omarchy pkg add "$@"
+    run_cmd omarchy pkg add "${missing[@]}"
   elif has_cmd sudo && has_cmd pacman; then
-    run_cmd sudo pacman -S --needed --noconfirm "$@"
+    run_cmd sudo pacman -S --needed --noconfirm "${missing[@]}"
   else
     die "No package install command found (tried omarchy-pkg-add, omarchy pkg add, pacman)."
   fi
@@ -261,14 +275,28 @@ pkg_remove() {
     return 0
   fi
 
+  local installed=()
+  local pkg
+  for pkg in "$@"; do
+    if has_cmd pacman && pacman -Q "$pkg" >/dev/null 2>&1; then
+      installed+=("$pkg")
+    else
+      debug "Package is not installed, skipping removal: $pkg"
+    fi
+  done
+
+  if [[ ${#installed[@]} -eq 0 ]]; then
+    return 0
+  fi
+
   if has_cmd omarchy-pkg-drop; then
-    run_cmd omarchy-pkg-drop "$@"
+    run_cmd omarchy-pkg-drop "${installed[@]}"
   elif has_cmd omarchy-pkg-remove; then
-    run_cmd omarchy-pkg-remove "$@"
+    run_cmd omarchy-pkg-remove "${installed[@]}"
   elif has_cmd omarchy; then
-    run_cmd omarchy pkg drop "$@"
+    run_cmd omarchy pkg drop "${installed[@]}"
   elif has_cmd sudo && has_cmd pacman; then
-    run_cmd sudo pacman -Rns --noconfirm "$@"
+    run_cmd sudo pacman -Rns --noconfirm "${installed[@]}"
   else
     die "No package remove command found (tried omarchy-pkg-drop, omarchy pkg drop, pacman)."
   fi
@@ -304,6 +332,10 @@ browser_install() {
 
   case "$browser" in
     chrome|google-chrome|google-chrome-stable)
+      if has_cmd pacman && pacman -Q google-chrome >/dev/null 2>&1; then
+        debug "Browser already installed, skipping: chrome"
+        return 0
+      fi
       if has_cmd omarchy-install-browser; then
         run_cmd omarchy-install-browser chrome
       else
@@ -328,6 +360,10 @@ browser_remove() {
 
   case "$browser" in
     chrome|google-chrome|google-chrome-stable)
+      if has_cmd pacman && ! pacman -Q google-chrome >/dev/null 2>&1; then
+        debug "Browser is not installed, skipping removal: chrome"
+        return 0
+      fi
       if has_cmd omarchy-remove-browser; then
         run_cmd omarchy-remove-browser chrome
       else
@@ -335,6 +371,17 @@ browser_remove() {
       fi
       ;;
     brave|brave-origin|edge|firefox|zen)
+      local package_name="$browser"
+      case "$browser" in
+        brave) package_name="brave-bin" ;;
+        brave-origin) package_name="brave-origin-beta-bin" ;;
+        edge) package_name="microsoft-edge-stable-bin" ;;
+        zen) package_name="zen-browser-bin" ;;
+      esac
+      if has_cmd pacman && ! pacman -Q "$package_name" >/dev/null 2>&1; then
+        debug "Browser is not installed, skipping removal: $browser"
+        return 0
+      fi
       if has_cmd omarchy-remove-browser; then
         run_cmd omarchy-remove-browser "$browser"
       else
@@ -352,6 +399,10 @@ editor_install() {
 
   case "$editor" in
     code|vscode|visual-studio-code|visual-studio-code-bin)
+      if has_cmd pacman && pacman -Q visual-studio-code-bin >/dev/null 2>&1; then
+        debug "Editor already installed, skipping: code"
+        return 0
+      fi
       if has_cmd omarchy-install-vscode; then
         run_cmd omarchy-install-vscode
       else
@@ -369,6 +420,10 @@ editor_remove() {
 
   case "$editor" in
     code|vscode|visual-studio-code|visual-studio-code-bin)
+      if has_cmd pacman && ! pacman -Q visual-studio-code-bin >/dev/null 2>&1; then
+        debug "Editor is not installed, skipping removal: code"
+        return 0
+      fi
       pkg_remove visual-studio-code-bin
       ;;
     *)
@@ -420,8 +475,15 @@ theme_install_fallback() {
 install_theme() {
   local repo="$1"
   local apply_theme="$2"
+  local theme_name
+  local theme_path
 
-  if has_cmd omarchy-theme-install; then
+  theme_name="$(theme_name_from_repo "$repo")"
+  theme_path="$HOME/.config/omarchy/themes/$theme_name"
+
+  if [[ -d "$theme_path" ]]; then
+    debug "Theme already installed, skipping install: $theme_name"
+  elif has_cmd omarchy-theme-install; then
     run_cmd omarchy-theme-install "$repo"
   elif has_cmd omarchy; then
     run_cmd omarchy theme install "$repo"
@@ -431,8 +493,6 @@ install_theme() {
   fi
 
   if [[ "$apply_theme" == "true" ]]; then
-    local theme_name
-    theme_name="$(theme_name_from_repo "$repo")"
     if has_cmd omarchy-theme-set; then
       run_cmd omarchy-theme-set "$theme_name"
     elif has_cmd omarchy; then
@@ -457,12 +517,12 @@ add_theme_background() {
 
   if [[ "$source" =~ ^https?:// ]]; then
     require_cmd curl
-    run_cmd curl -fsSL "$source" -o "$target_path"
+    run_cmd curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "$source" -o "$target_path"
   elif [[ -n "$RAW_BASE_URL" ]]; then
     local asset_path
     asset_path="$(validate_relative_asset_path "$source")"
     require_cmd curl
-    run_cmd curl -fsSL "${RAW_BASE_URL}/${asset_path}" -o "$target_path"
+    run_cmd curl -fsSL -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' "${RAW_BASE_URL}/${asset_path}?_=$(date +%s)" -o "$target_path"
   else
     local src_path
     src_path="$(resolve_local_asset_path "$source")"
@@ -506,7 +566,10 @@ apply_file_op() {
       if [[ "$DRY_RUN" == true ]]; then
         log "DRY-RUN: append to file $expanded"
       else
-        printf '%s' "$content" >>"$expanded"
+        touch "$expanded"
+        if ! grep -Fq "$content" "$expanded"; then
+          printf '%s' "$content" >>"$expanded"
+        fi
       fi
       ;;
     replace)
@@ -541,6 +604,20 @@ apply_file_op() {
 sanitize_id() {
   local input="$1"
   printf '%s' "$input" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//'
+}
+
+web_app_desktop_file() {
+  local name="$1"
+  local direct="$HOME/.local/share/applications/$name.desktop"
+  local sanitized="$HOME/.local/share/applications/$(sanitize_id "$name").desktop"
+
+  if [[ -f "$direct" ]]; then
+    printf '%s\n' "$direct"
+  elif [[ -f "$sanitized" ]]; then
+    printf '%s\n' "$sanitized"
+  else
+    printf '%s\n' "$direct"
+  fi
 }
 
 add_web_app() {
@@ -585,16 +662,14 @@ EOF
 
 remove_web_app() {
   local name="$1"
-  local id
   local desktop_file
 
-  id="$(sanitize_id "$name")"
-  desktop_file="$HOME/.local/share/applications/$id.desktop"
+  desktop_file="$(web_app_desktop_file "$name")"
 
   if [[ -f "$desktop_file" ]]; then
     run_cmd rm -f "$desktop_file"
   else
-    debug "Web app launcher not found, skipping: $desktop_file"
+    log "Web app not found, skipping removal: $name"
   fi
 }
 
@@ -673,7 +748,9 @@ add_web_app_omarchy() {
   local custom_exec="$4"
   local mime_types="$5"
 
-  if has_cmd omarchy-webapp-install; then
+  if [[ -f "$(web_app_desktop_file "$name")" ]]; then
+    debug "Web app already installed, skipping: $name"
+  elif has_cmd omarchy-webapp-install; then
     run_cmd omarchy-webapp-install "$name" "$url" "$icon" "$custom_exec" "$mime_types"
   else
     add_web_app_fallback "$name" "$url" "$icon" "$custom_exec" "$mime_types"
@@ -695,12 +772,30 @@ remove_web_apps_omarchy() {
     return 0
   fi
 
+  local existing=()
+  local missing=()
+  local name
+  for name in "$@"; do
+    if [[ -f "$(web_app_desktop_file "$name")" ]]; then
+      existing+=("$name")
+    else
+      missing+=("$name")
+    fi
+  done
+
+  for name in "${missing[@]}"; do
+    log "Web app not found, skipping removal: $name"
+  done
+
+  if [[ ${#existing[@]} -eq 0 ]]; then
+    return 0
+  fi
+
   if has_cmd omarchy-webapp-remove; then
-    run_cmd omarchy-webapp-remove "$@"
+    run_cmd omarchy-webapp-remove "${existing[@]}"
     needs_walker_restart=false
   else
-    local name
-    for name in "$@"; do
+    for name in "${existing[@]}"; do
       remove_web_app "$name"
     done
     needs_walker_restart=true

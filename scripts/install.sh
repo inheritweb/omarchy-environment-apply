@@ -5,6 +5,14 @@ SCRIPT_NAME="omarchy-environment-apply"
 BIN_DIR="${HOME}/.local/bin"
 SOURCE_URL=""
 FORCE=false
+TEMP_FILE=""
+
+cleanup() {
+  if [[ -n "${TEMP_FILE:-}" && -f "$TEMP_FILE" ]]; then
+    rm -f "$TEMP_FILE"
+  fi
+}
+trap cleanup EXIT
 
 usage() {
   cat <<'EOF'
@@ -73,17 +81,16 @@ main() {
 
   [[ -n "$BIN_DIR" ]] || die "--bin-dir cannot be empty"
 
-  local script_dir source_path target_path temp_file
+  local script_dir source_path target_path
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   source_path="$script_dir/../bin/$SCRIPT_NAME"
   target_path="$BIN_DIR/$SCRIPT_NAME"
-  temp_file="$(mktemp)"
-  trap 'rm -f "$temp_file"' EXIT
+  TEMP_FILE="$(mktemp)"
 
   if [[ -n "$SOURCE_URL" ]]; then
-    fetch_to_file "$SOURCE_URL" "$temp_file"
+    fetch_to_file "$SOURCE_URL" "$TEMP_FILE"
   elif [[ -f "$source_path" ]]; then
-    cp "$source_path" "$temp_file"
+    cp "$source_path" "$TEMP_FILE"
   else
     die "Local script not found next to install.sh. Use --from URL instead."
   fi
@@ -94,7 +101,7 @@ main() {
     die "$target_path already exists. Re-run with --force to replace it."
   fi
 
-  install -m 0755 "$temp_file" "$target_path"
+  install -m 0755 "$TEMP_FILE" "$target_path"
   printf '[install] Installed %s to %s\n' "$SCRIPT_NAME" "$target_path"
 
   case ":$PATH:" in

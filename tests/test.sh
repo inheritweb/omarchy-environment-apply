@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SCRIPT="$ROOT_DIR/bin/omarchy-environment-apply"
+INSTALLER="$ROOT_DIR/scripts/install.sh"
 
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -37,7 +38,7 @@ echo "$name \$*" >>"$LOG_FILE"
   done
   if [ -n "\$out" ]; then
     case "\$url" in
-      *environment.json)
+      *environment.json*)
         cp "$TMP_DIR/config.json" "\$out"
         ;;
       *)
@@ -49,6 +50,14 @@ echo "$name \$*" >>"$LOG_FILE"
 if [ "$name" = "pacman-conf" ]; then
   if [ "\$1" = "--repo-list" ]; then
     printf '%s\n' core extra omarchy
+  fi
+fi
+if [ "$name" = "pacman" ]; then
+  if [ "\$1" = "-Q" ]; then
+    if [ "\$2" = "firefox" ]; then
+      exit 0
+    fi
+    exit 1
   fi
 fi
 exit 0
@@ -80,9 +89,12 @@ for cmd in \
 done
 
 mkdir -p "$TEST_HOME/.config/waybar"
+mkdir -p "$TEST_HOME/.local/share/applications"
 mkdir -p "$TMP_DIR/assets"
 echo "local wallpaper" >"$TMP_DIR/assets/ocean.jpg"
 echo "font-size: 12px;" >"$TEST_HOME/.config/waybar/style.css"
+touch "$TEST_HOME/.local/share/applications/Legacy Tool.desktop"
+touch "$TEST_HOME/.local/share/applications/Old Other.desktop"
 
 cat >"$TMP_DIR/config.json" <<EOF
 {
@@ -159,8 +171,8 @@ assert_file_exists() {
 }
 
 assert_contains "omarchy-theme-install https://github.com/example/omarchy-ocean-theme.git" "$LOG_FILE"
-assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/environment.json" "$LOG_FILE"
-assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/assets/ocean.jpg" "$LOG_FILE"
+assert_contains "curl -fsSL -H Cache-Control: no-cache -H Pragma: no-cache https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/environment.json?_" "$LOG_FILE"
+assert_contains "curl -fsSL -H Cache-Control: no-cache -H Pragma: no-cache https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/assets/ocean.jpg?_" "$LOG_FILE"
 assert_contains "omarchy-theme-bg-set $TEST_HOME/.config/omarchy/backgrounds/ocean/ocean.jpg" "$LOG_FILE"
 assert_contains "omarchy-restart-waybar" "$LOG_FILE"
 assert_contains "sudo pacman -Sy --noconfirm" "$LOG_FILE"
@@ -168,16 +180,24 @@ assert_contains "omarchy-install-browser chrome" "$LOG_FILE"
 assert_contains "omarchy-install-vscode" "$LOG_FILE"
 assert_contains "omarchy-pkg-add ripgrep nvm" "$LOG_FILE"
 assert_contains "omarchy-remove-browser firefox" "$LOG_FILE"
-assert_contains "omarchy-pkg-drop thunderbird" "$LOG_FILE"
 assert_contains "omarchy-webapp-install Linear https://linear.app" "$LOG_FILE"
 assert_contains "omarchy-webapp-remove Legacy Tool Old Other" "$LOG_FILE"
 
 assert_contains "13px" "$TEST_HOME/.config/waybar/style.css"
 assert_contains "#clock { color: #ffffff; }" "$TEST_HOME/.config/waybar/style.css"
+if [[ "$(grep -Fxc "#clock { color: #ffffff; }" "$TEST_HOME/.config/waybar/style.css")" != "1" ]]; then
+  echo "Assertion failed: append action duplicated content"
+  cat "$TEST_HOME/.config/waybar/style.css"
+  exit 1
+fi
 assert_contains "https://new.example/b?x=1&y=2" "$TMP_DIR/replace.txt"
 
 assert_file_exists "$TEST_HOME/.config/omarchy/backgrounds/ocean/ocean.jpg"
 
 assert_contains "source /usr/share/nvm/init-nvm.sh" "$TEST_HOME/.bashrc"
+
+INSTALL_HOME="$TMP_DIR/install-home"
+HOME="$INSTALL_HOME" "$INSTALLER" --force
+assert_file_exists "$INSTALL_HOME/.local/bin/omarchy-environment-apply"
 
 echo "All tests passed."
