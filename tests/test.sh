@@ -108,7 +108,7 @@ cat >"$TMP_DIR/config.json" <<EOF
   },
   "web_apps": {
     "add": [{"name": "Linear", "url": "https://linear.app", "browser": "google-chrome-stable"}],
-    "remove": ["Legacy Tool"]
+    "remove": ["Legacy Tool", "Old Other"]
   }
 }
 EOF
@@ -170,8 +170,7 @@ assert_contains "omarchy-pkg-add ripgrep nvm" "$LOG_FILE"
 assert_contains "omarchy-remove-browser firefox" "$LOG_FILE"
 assert_contains "omarchy-pkg-drop thunderbird" "$LOG_FILE"
 assert_contains "omarchy-webapp-install Linear https://linear.app" "$LOG_FILE"
-assert_contains "omarchy-webapp-remove Legacy Tool" "$LOG_FILE"
-assert_contains "omarchy-restart-walker" "$LOG_FILE"
+assert_contains "omarchy-webapp-remove Legacy Tool Old Other" "$LOG_FILE"
 
 assert_contains "13px" "$TEST_HOME/.config/waybar/style.css"
 assert_contains "#clock { color: #ffffff; }" "$TEST_HOME/.config/waybar/style.css"

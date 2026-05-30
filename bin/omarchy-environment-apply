@@ -690,6 +690,23 @@ remove_web_app_omarchy() {
   fi
 }
 
+remove_web_apps_omarchy() {
+  if [[ $# -eq 0 ]]; then
+    return 0
+  fi
+
+  if has_cmd omarchy-webapp-remove; then
+    run_cmd omarchy-webapp-remove "$@"
+    needs_walker_restart=false
+  else
+    local name
+    for name in "$@"; do
+      remove_web_app "$name"
+    done
+    needs_walker_restart=true
+  fi
+}
+
 read_json_array() {
   local query="$1"
   jq -r "($query // []) | .[]?" "$CONFIG_FILE"
@@ -838,11 +855,8 @@ main() {
     needs_walker_restart=true
   done < <(jq -c '.web_apps.add[]?' "$CONFIG_FILE")
 
-  while IFS= read -r app_name; do
-    [[ -n "$app_name" ]] || continue
-    remove_web_app_omarchy "$app_name"
-    needs_walker_restart=true
-  done < <(read_json_array '.web_apps.remove')
+  mapfile -t web_apps_remove < <(read_json_array '.web_apps.remove')
+  remove_web_apps_omarchy "${web_apps_remove[@]}"
 
   restart_after_file_changes false false "$needs_walker_restart"
 
