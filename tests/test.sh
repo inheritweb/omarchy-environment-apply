@@ -50,7 +50,25 @@ EOF
   chmod +x "$STUB_DIR/$name"
 }
 
-for cmd in omarchy-theme-install omarchy-theme-set omarchy omarchy-pkg-add omarchy-pkg-drop sudo pacman git curl; do
+for cmd in \
+  omarchy-theme-install \
+  omarchy-theme-set \
+  omarchy-theme-bg-set \
+  omarchy-restart-waybar \
+  omarchy-restart-walker \
+  omarchy-install-browser \
+  omarchy-remove-browser \
+  omarchy-install-vscode \
+  omarchy-webapp-install \
+  omarchy-webapp-remove \
+  omarchy \
+  omarchy-pkg-add \
+  omarchy-pkg-drop \
+  hyprctl \
+  sudo \
+  pacman \
+  git \
+  curl; do
   create_stub "$cmd"
 done
 
@@ -136,16 +154,22 @@ assert_file_exists() {
 assert_contains "omarchy-theme-install https://github.com/example/omarchy-ocean-theme.git" "$LOG_FILE"
 assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/environment.json" "$LOG_FILE"
 assert_contains "curl -fsSL https://raw.githubusercontent.com/example/omarchy-ocean-theme/HEAD/assets/ocean.jpg" "$LOG_FILE"
-assert_contains "omarchy-pkg-add google-chrome code ripgrep nvm" "$LOG_FILE"
-assert_contains "omarchy-pkg-drop firefox thunderbird" "$LOG_FILE"
+assert_contains "omarchy-theme-bg-set $TEST_HOME/.config/omarchy/backgrounds/ocean/ocean.jpg" "$LOG_FILE"
+assert_contains "omarchy-restart-waybar" "$LOG_FILE"
+assert_contains "omarchy-install-browser chrome" "$LOG_FILE"
+assert_contains "omarchy-install-vscode" "$LOG_FILE"
+assert_contains "omarchy-pkg-add ripgrep nvm" "$LOG_FILE"
+assert_contains "omarchy-remove-browser firefox" "$LOG_FILE"
+assert_contains "omarchy-pkg-drop thunderbird" "$LOG_FILE"
+assert_contains "omarchy-webapp-install Linear https://linear.app" "$LOG_FILE"
+assert_contains "omarchy-webapp-remove Legacy Tool" "$LOG_FILE"
+assert_contains "omarchy-restart-walker" "$LOG_FILE"
 
 assert_contains "13px" "$TEST_HOME/.config/waybar/style.css"
 assert_contains "#clock { color: #ffffff; }" "$TEST_HOME/.config/waybar/style.css"
 assert_contains "https://new.example/b?x=1&y=2" "$TMP_DIR/replace.txt"
 
-assert_file_exists "$TEST_HOME/.local/share/applications/linear.desktop"
-assert_file_exists "$TEST_HOME/.config/omarchy/themes/ocean/ocean.jpg"
-assert_contains "Exec=google-chrome-stable --app=\"https://linear.app\"" "$TEST_HOME/.local/share/applications/linear.desktop"
+assert_file_exists "$TEST_HOME/.config/omarchy/backgrounds/ocean/ocean.jpg"
 
 assert_contains "source /usr/share/nvm/init-nvm.sh" "$TEST_HOME/.bashrc"
 

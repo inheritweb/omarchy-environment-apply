@@ -273,6 +273,84 @@ pkg_remove() {
   fi
 }
 
+browser_install() {
+  local browser="$1"
+
+  case "$browser" in
+    chrome|google-chrome|google-chrome-stable)
+      if has_cmd omarchy-install-browser; then
+        run_cmd omarchy-install-browser chrome
+      else
+        pkg_install google-chrome
+      fi
+      ;;
+    brave|brave-origin|edge|firefox|zen)
+      if has_cmd omarchy-install-browser; then
+        run_cmd omarchy-install-browser "$browser"
+      else
+        pkg_install "$browser"
+      fi
+      ;;
+    *)
+      pkg_install "$browser"
+      ;;
+  esac
+}
+
+browser_remove() {
+  local browser="$1"
+
+  case "$browser" in
+    chrome|google-chrome|google-chrome-stable)
+      if has_cmd omarchy-remove-browser; then
+        run_cmd omarchy-remove-browser chrome
+      else
+        pkg_remove google-chrome
+      fi
+      ;;
+    brave|brave-origin|edge|firefox|zen)
+      if has_cmd omarchy-remove-browser; then
+        run_cmd omarchy-remove-browser "$browser"
+      else
+        pkg_remove "$browser"
+      fi
+      ;;
+    *)
+      pkg_remove "$browser"
+      ;;
+  esac
+}
+
+editor_install() {
+  local editor="$1"
+
+  case "$editor" in
+    code|vscode|visual-studio-code|visual-studio-code-bin)
+      if has_cmd omarchy-install-vscode; then
+        run_cmd omarchy-install-vscode
+      else
+        pkg_install visual-studio-code-bin
+      fi
+      ;;
+    *)
+      pkg_install "$editor"
+      ;;
+  esac
+}
+
+editor_remove() {
+  local editor="$1"
+
+  case "$editor" in
+    code|vscode|visual-studio-code|visual-studio-code-bin)
+      pkg_remove visual-studio-code-bin
+      ;;
+    *)
+      pkg_remove "$editor"
+      ;;
+  esac
+}
+
 theme_name_from_repo() {
   local repo="$1"
   local path_part="$repo"
@@ -342,7 +420,7 @@ add_theme_background() {
   local source="$2"
   local target_name="$3"
   local link_default="$4"
-  local theme_dir="$HOME/.config/omarchy/themes/$theme"
+  local theme_dir="$HOME/.config/omarchy/backgrounds/$theme"
   local target_path
 
   [[ "$target_name" != */* && "$target_name" != "." && "$target_name" != ".." ]] || die "Invalid background target_name: $target_name"
@@ -367,7 +445,14 @@ add_theme_background() {
   fi
 
   if [[ "$link_default" == "true" ]]; then
-    run_cmd ln -sfn "$target_path" "$theme_dir/background"
+    if has_cmd omarchy-theme-bg-set; then
+      run_cmd omarchy-theme-bg-set "$target_path"
+    elif has_cmd omarchy; then
+      run_cmd omarchy theme bg set "$target_path"
+    else
+      run_cmd mkdir -p "$HOME/.config/omarchy/current"
+      run_cmd ln -sfn "$target_path" "$HOME/.config/omarchy/current/background"
+    fi
   fi
 }
 
@@ -487,6 +572,98 @@ remove_web_app() {
   fi
 }
 
+add_web_app_fallback() {
+  local name="$1"
+  local url="$2"
+  local icon="$3"
+  local custom_exec="$4"
+  local mime_types="$5"
+  local app_dir="$HOME/.local/share/applications"
+  local desktop_file="$app_dir/$name.desktop"
+  local exec_command="${custom_exec:-omarchy-launch-webapp $url}"
+
+  run_cmd mkdir -p "$app_dir"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "DRY-RUN: create web app launcher $desktop_file"
+    return 0
+  fi
+
+  cat >"$desktop_file" <<EOF
+[Desktop Entry]
+Version=1.0
+Name=$name
+Comment=$name
+Exec=$exec_command
+Terminal=false
+Type=Application
+Icon=${icon:-web-browser}
+StartupNotify=true
+EOF
+
+  if [[ -n "$mime_types" ]]; then
+    printf 'MimeType=%s\n' "$mime_types" >>"$desktop_file"
+  fi
+
+  chmod +x "$desktop_file"
+}
+
+restart_after_file_changes() {
+  local needs_waybar="$1"
+  local needs_hyprland="$2"
+  local needs_walker="$3"
+
+  if [[ "$needs_waybar" == "true" ]]; then
+    if has_cmd omarchy-restart-waybar; then
+      run_cmd omarchy-restart-waybar
+    elif has_cmd omarchy; then
+      run_cmd omarchy restart waybar
+    fi
+  fi
+
+  if [[ "$needs_hyprland" == "true" ]]; then
+    if has_cmd hyprctl; then
+      run_cmd hyprctl reload
+    elif has_cmd omarchy-restart-hyprctl; then
+      run_cmd omarchy-restart-hyprctl
+    elif has_cmd omarchy; then
+      run_cmd omarchy restart hyprctl
+    fi
+  fi
+
+  if [[ "$needs_walker" == "true" ]]; then
+    if has_cmd omarchy-restart-walker; then
+      run_cmd omarchy-restart-walker
+    elif has_cmd omarchy; then
+      run_cmd omarchy restart walker
+    fi
+  fi
+}
+
+add_web_app_omarchy() {
+  local name="$1"
+  local url="$2"
+  local icon="$3"
+  local custom_exec="$4"
+  local mime_types="$5"
+
+  if has_cmd omarchy-webapp-install; then
+    run_cmd omarchy-webapp-install "$name" "$url" "$icon" "$custom_exec" "$mime_types"
+  else
+    add_web_app_fallback "$name" "$url" "$icon" "$custom_exec" "$mime_types"
+  fi
+}
+
+remove_web_app_omarchy() {
+  local name="$1"
+
+  if has_cmd omarchy-webapp-remove; then
+    run_cmd omarchy-webapp-remove "$name"
+  else
+    remove_web_app "$name"
+  fi
+}
+
 read_json_array() {
   local query="$1"
   jq -r "($query // []) | .[]?" "$CONFIG_FILE"
@@ -559,6 +736,10 @@ main() {
     add_theme_background "$theme" "$source" "$target" "$link_default"
   done < <(jq -c '.themes.backgrounds[]?' "$CONFIG_FILE")
 
+  local needs_waybar_restart=false
+  local needs_hyprland_reload=false
+  local needs_walker_restart=false
+
   while IFS= read -r file_op; do
     [[ -n "$file_op" ]] || continue
     local path action content search replace
@@ -568,7 +749,21 @@ main() {
     search=$(jq -r '(.search // "")' <<<"$file_op")
     replace=$(jq -r '(.replace // "")' <<<"$file_op")
     apply_file_op "$path" "$action" "$content" "$search" "$replace"
+
+    case "$(expand_path "$path")" in
+      "$HOME/.config/waybar/"*)
+        needs_waybar_restart=true
+        ;;
+      "$HOME/.config/hypr/"*)
+        needs_hyprland_reload=true
+        ;;
+      "$HOME/.config/walker/"*|"$HOME/.config/elephant/"*)
+        needs_walker_restart=true
+        ;;
+    esac
   done < <(jq -c '.files[]?' "$CONFIG_FILE")
+
+  restart_after_file_changes "$needs_waybar_restart" "$needs_hyprland_reload" "$needs_walker_restart"
 
   mapfile -t browsers_add < <(read_json_array '.browsers.add')
   mapfile -t browsers_remove < <(read_json_array '.browsers.remove')
@@ -577,24 +772,49 @@ main() {
   mapfile -t pkgs_add < <(read_json_array '.packages.add')
   mapfile -t pkgs_remove < <(read_json_array '.packages.remove')
 
-  pkg_install "${browsers_add[@]}" "${editors_add[@]}" "${pkgs_add[@]}"
-  pkg_remove "${browsers_remove[@]}" "${editors_remove[@]}" "${pkgs_remove[@]}"
+  for browser in "${browsers_add[@]}"; do
+    [[ -n "$browser" ]] || continue
+    browser_install "$browser"
+  done
+
+  for editor in "${editors_add[@]}"; do
+    [[ -n "$editor" ]] || continue
+    editor_install "$editor"
+  done
+
+  pkg_install "${pkgs_add[@]}"
+
+  for browser in "${browsers_remove[@]}"; do
+    [[ -n "$browser" ]] || continue
+    browser_remove "$browser"
+  done
+
+  for editor in "${editors_remove[@]}"; do
+    [[ -n "$editor" ]] || continue
+    editor_remove "$editor"
+  done
+
+  pkg_remove "${pkgs_remove[@]}"
 
   while IFS= read -r app; do
     [[ -n "$app" ]] || continue
-    local name url browser icon categories
+    local name url icon custom_exec mime_types
     name=$(jq -r '.name' <<<"$app")
     url=$(jq -r '.url' <<<"$app")
-    browser=$(jq -r '(.browser // "google-chrome-stable")' <<<"$app")
-    icon=$(jq -r '(.icon // "web-browser")' <<<"$app")
-    categories=$(jq -r '(.categories // "Network;")' <<<"$app")
-    add_web_app "$name" "$url" "$browser" "$icon" "$categories"
+    icon=$(jq -r '(.icon // "")' <<<"$app")
+    custom_exec=$(jq -r '(.exec // "")' <<<"$app")
+    mime_types=$(jq -r '(.mime_types // "")' <<<"$app")
+    add_web_app_omarchy "$name" "$url" "$icon" "$custom_exec" "$mime_types"
+    needs_walker_restart=true
   done < <(jq -c '.web_apps.add[]?' "$CONFIG_FILE")
 
   while IFS= read -r app_name; do
     [[ -n "$app_name" ]] || continue
-    remove_web_app "$app_name"
+    remove_web_app_omarchy "$app_name"
+    needs_walker_restart=true
   done < <(read_json_array '.web_apps.remove')
+
+  restart_after_file_changes false false "$needs_walker_restart"
 
   log "Environment apply complete."
 }
